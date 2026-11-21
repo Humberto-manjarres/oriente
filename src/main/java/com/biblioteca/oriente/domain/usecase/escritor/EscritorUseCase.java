@@ -2,6 +2,7 @@ package com.biblioteca.oriente.domain.usecase.escritor;
 
 import com.biblioteca.oriente.domain.model.escritor.Escritor;
 import com.biblioteca.oriente.domain.model.escritor.gateway.EscritorGateway;
+import com.biblioteca.oriente.domain.model.exception.RecursoNoEncontradoException;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
 
@@ -15,7 +16,8 @@ public class EscritorUseCase {
     }
 
     public Mono<Escritor> obtenerEscritorPorId(String escritorId) {
-        return escritorGateway.consultarEscritor(escritorId);
+        return escritorGateway.consultarEscritor(escritorId)
+                .switchIfEmpty(Mono.error(new RecursoNoEncontradoException("Escritor", escritorId)));
     }
 
 }
