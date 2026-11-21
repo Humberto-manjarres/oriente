@@ -1,0 +1,10 @@
+server:
+  port: 8080
+spring:
+  application:
+    name: "oriente"
+
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/oriente_db
+      #database: oriente_db
