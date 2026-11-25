@@ -1,6 +1,7 @@
 package com.biblioteca.oriente.infraestructure.driven_adapters.reactive_repository.escritor_mongo;
 
 import com.biblioteca.oriente.domain.model.escritor.Escritor;
+import com.biblioteca.oriente.domain.model.exception.RecursoDuplicadoException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -8,11 +9,13 @@ import org.mapstruct.factory.Mappers;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DuplicateKeyException;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -30,17 +33,18 @@ class EscritorAdapterTest {
     }
 
     @Test
-    void crearEscritorDebeGuardarEntityYRetornarDominio() {
+    void crearEscritorDebeInsertarEntityYRetornarDominio() {
         Escritor nuevo = new Escritor(null, "1001", "Gabriel García Márquez", "Colombiana");
         EscritorEntity guardada = new EscritorEntity("abc123", "1001", "Gabriel García Márquez", "Colombiana");
-        when(repository.save(any(EscritorEntity.class))).thenReturn(Mono.just(guardada));
+        when(repository.insert(any(EscritorEntity.class))).thenReturn(Mono.just(guardada));
 
         StepVerifier.create(adapter.crearEscritor(nuevo))
                 .expectNext(new Escritor("abc123", "1001", "Gabriel García Márquez", "Colombiana"))
                 .verifyComplete();
 
         ArgumentCaptor<EscritorEntity> captor = ArgumentCaptor.forClass(EscritorEntity.class);
-        verify(repository).save(captor.capture());
+        verify(repository).insert(captor.capture());
+        verify(repository, never()).save(any(EscritorEntity.class));
         assertThat(captor.getValue().getId()).isNull();
         assertThat(captor.getValue().getIdentificacion()).isEqualTo("1001");
         assertThat(captor.getValue().getNombre()).isEqualTo("Gabriel García Márquez");
@@ -48,12 +52,27 @@ class EscritorAdapterTest {
     }
 
     @Test
-    void crearEscritorDebePropagarErrorDelRepositorio() {
+    void crearEscritorDebeTraducirLlaveDuplicadaAExcepcionDeDominio() {
         Escritor nuevo = new Escritor(null, "1001", "Gabriel García Márquez", "Colombiana");
-        when(repository.save(any(EscritorEntity.class))).thenReturn(Mono.error(new IllegalStateException("fallo mongo")));
+        when(repository.insert(any(EscritorEntity.class)))
+                .thenReturn(Mono.error(new DuplicateKeyException("E11000 duplicate key error")));
 
         StepVerifier.create(adapter.crearEscritor(nuevo))
-                .expectErrorMessage("fallo mongo")
+                .expectErrorSatisfies(error -> assertThat(error)
+                        .isInstanceOf(RecursoDuplicadoException.class)
+                        .hasMessage("Escritor ya existe con identificador: 1001"))
+                .verify();
+    }
+
+    @Test
+    void crearEscritorDebePropagarOtrosErroresDelRepositorio() {
+        Escritor nuevo = new Escritor(null, "1001", "Gabriel García Márquez", "Colombiana");
+        when(repository.insert(any(EscritorEntity.class))).thenReturn(Mono.error(new IllegalStateException("fallo mongo")));
+
+        StepVerifier.create(adapter.crearEscritor(nuevo))
+                .expectErrorSatisfies(error -> assertThat(error)
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessage("fallo mongo"))
                 .verify();
     }
 

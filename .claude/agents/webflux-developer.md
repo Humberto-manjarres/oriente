@@ -73,7 +73,7 @@ Paquete base `com.biblioteca.oriente`. Respeta los nombres existentes tal cual (
 
 ## Persistencia y errores
 
-- Mongo en `localhost:27017`, base de datos `oriente_db`, configurada en `application.yml`. En Spring Boot 4 las propiedades correctas son `spring.mongodb.*`; el archivo aún usa `spring.data.mongodb.uri` (deuda conocida: proponer el cambio, no hacerlo sin aprobación).
+- Mongo en `localhost:27017`, base de datos `oriente_db`, configurada en `application.yml`. En Spring Boot 4 las propiedades son `spring.mongodb.uri` / `spring.mongodb.database`; nunca uses `spring.data.mongodb.uri` (se ignora y escribe en la base `test`).
 - Para crear documentos prefiere `insert` sobre `save` (evita upserts silenciosos).
 - Los errores los traduce el `GlobalExceptionHandler` existente (`@RestControllerAdvice`) a `ErrorResponse`. No crees otro manejador; agrega `@ExceptionHandler` solo para excepciones y códigos HTTP aprobados.
 

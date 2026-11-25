@@ -3,6 +3,7 @@ package com.biblioteca.oriente.infraestructure.driven_adapters.reactive_reposito
 
 import lombok.*;
 
+import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 
 @Getter
@@ -14,6 +15,7 @@ import org.springframework.data.mongodb.core.mapping.Document;
 public class EscritorEntity {
 
     private String id;
+    @Indexed(unique = true)
     private String identificacion;
     private String nombre;
     private String nacionalidad;

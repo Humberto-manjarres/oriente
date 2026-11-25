@@ -65,7 +65,7 @@ Reglas de estructura:
 
 | Contexto | Estado |
 |---|---|
-| `escritor` | Implementado: crear (`POST /escritor/crear`) y consultar por identificación (`GET /escritor/{escritorId}`). Implementación de referencia. |
+| `escritor` | Implementado: crear (`POST /escritor` → 201 + `Location`; 409 si la identificación ya existe) y consultar por identificación (`GET /escritor/{identificacion}`). `identificacion` y `nombre` son obligatorios (400 si faltan; `nacionalidad` es opcional). `identificacion` es única (validación en el caso de uso + índice único en Mongo). Implementación de referencia. |
 | `libro` | Esqueleto: modelo `Libro` (`id`, `descripcion`) y `LibroEntity` (`codigoLibro`, `nombre`, `valorUnitario`, `escritorId`, `categoriaId`) no coinciden; `LibroAdapter` y `LibroRepository` vacíos. |
 | `categoria` | Esqueleto: `Categoria`, `CategoriaAdapter`, `CategoriaEntity`, `CategoriaRepository` vacíos. |
 
@@ -93,11 +93,15 @@ Prohibido:
 - Gateways y casos de uso devuelven `Mono`/`Flux`; métodos en español `<accion><Entidad>` (`crearEscritor`, `consultarEscritor`).
 - Gateways solo con operaciones que usa un caso de uso aprobado.
 - Reglas de negocio en el caso de uso (p. ej. inexistente → `RecursoNoEncontradoException`); controllers y adapters sin lógica de negocio.
+- Campos obligatorios: se validan al inicio del caso de uso (`null`, vacío o solo espacios = faltante), antes de llamar al gateway, y se reportan todos juntos con `CampoObligatorioException(recurso, campos)` → 400. No usar Bean Validation (`@NotBlank`/`@Valid`) sin aprobación: el proyecto no tiene `spring-boot-starter-validation`.
 - MapStruct: `@Mapper` sin `componentModel`, métodos `toEntity`/`toDomain` (repositorio) y `toEntity`/`toDTO` (REST), registrados en `TransformerConfig`.
-- Errores HTTP solo en `GlobalExceptionHandler` con `ErrorResponse(status, error, message, path, timestamp)`. Mapeo vigente: `RecursoNoEncontradoException` → 404, `Exception` → 500 con mensaje genérico. Códigos nuevos (409, 400…) requieren aprobación.
+- Errores HTTP solo en `GlobalExceptionHandler` con `ErrorResponse(status, error, message, path, timestamp)`. Mapeo vigente: `CampoObligatorioException` → 400, `RecursoNoEncontradoException` → 404, `RecursoDuplicadoException` → 409, `ServerWebInputException` (body ausente, JSON inválido) → 400, otras `ResponseStatusException` (405, 415…) → su propio código, `Exception` → 500 con mensaje genérico. Los 4xx se registran con `log.warn` y el 500 con `log.error` y stack trace. Códigos nuevos requieren aprobación.
+- Rutas REST sin verbos en la URL: `POST /<contexto>` (201 + `Location`), `GET /<contexto>/{clave}`. No usar segmentos como `/crear` junto a `/{variable}`: generan rutas ambiguas.
 - Prohibido en código productivo: `block()`, `subscribe()`, `Thread.sleep()`, `Future.get()`, `CompletableFuture.join()`, `System.out` / `System.err` (usar SLF4J `@Slf4j` en infraestructura).
-- Para crear documentos preferir `insert` sobre `save` (evita upserts silenciosos).
+- Para crear documentos usar `insert`, no `save` (evita upserts silenciosos).
+- Claves de negocio únicas: validar en el caso de uso (→ `RecursoDuplicadoException`) y declarar `@Indexed(unique = true)` en la entity; el adapter traduce `DuplicateKeyException` a la misma excepción. Requiere `spring.data.mongodb.auto-index-creation: true` (ya configurado).
 - Nunca credenciales en `application.yml`; usar variables de entorno.
+- Mongo se configura con `spring.mongodb.uri` / `spring.mongodb.database` (Spring Boot 4). `spring.data.mongodb.uri` se ignora y hace que se escriba en la base `test`.
 
 ## Flujo de trabajo por fases
 
@@ -138,11 +142,8 @@ JAVA_HOME="/c/Program Files/Java/jdk-17" ./gradlew bootRun
 
 No corregir sin aprobación; señalarla cuando la tarea toque esos archivos.
 
-- `EscritorAdapter` y `EscritorController` usan `System.out`/`System.err`; `EscritorAdapter.crearEscritor` usa `save`.
-- `EscritorUseCase.obtenerEscritorPorId` usa `Mono.error(new ...)` en vez de `Mono.error(() -> ...)`.
 - `build.gradle` define `lombokMapstructBindingVersion` pero no declara `lombok-mapstruct-binding`.
-- `application.yml` usa `spring.data.mongodb.uri`, deprecada en Spring Boot 4 a favor de `spring.mongodb.uri`; `application.properties` repite `spring.application.name`.
-- `GlobalExceptionHandler` devuelve 500 para errores de entrada (JSON inválido, body ausente).
+- `application.properties` repite `spring.application.name` (la configuración real está en `application.yml`).
 
 ## Git
 

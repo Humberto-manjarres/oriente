@@ -116,8 +116,10 @@ public interface EscritorGateway {
 
 - Excepciones de dominio compartidas por todos los contextos, que extienden `RuntimeException`.
 - Una excepción por situación de negocio, reutilizable entre contextos mediante parámetros (p. ej. `recurso` + `identificador`), no una por contexto.
-- Existente: `RecursoNoEncontradoException(String recurso, String identificador)` → 404.
-- Previsto (comentado en `GlobalExceptionHandler`): `RecursoDuplicadoException` → 409. Crearla solo si el usuario la aprueba.
+- Existentes:
+  - `CampoObligatorioException(recurso, List<String> campos)` → 400 (`"<Recurso>: los siguientes campos son obligatorios: a, b"`).
+  - `RecursoNoEncontradoException(recurso, identificador)` → 404 (`"<Recurso> no encontrado con identificador: <id>"`).
+  - `RecursoDuplicadoException(recurso, identificador)` → 409 (`"<Recurso> ya existe con identificador: <id>"`).
 
 ```java
 package com.biblioteca.oriente.domain.model.exception;
@@ -146,7 +148,9 @@ Toda excepción nueva debe registrarse en `GlobalExceptionHandler` (sección 7.1
 - Sin `@Service`: se registra como `@Bean` en `UsecaseConfig`.
 - Inyección por constructor con `@RequiredArgsConstructor` y campo `private final`.
 - Depende de la interfaz del gateway, nunca del adapter.
-- Aquí viven las reglas de negocio: recurso inexistente → `RecursoNoEncontradoException`, duplicados, etc.
+- Aquí viven las reglas de negocio: recurso inexistente → `RecursoNoEncontradoException`, clave de negocio repetida → `RecursoDuplicadoException`.
+- Campos obligatorios: validarlos primero, de forma síncrona (`null`, vacío o solo espacios = faltante), y si falta alguno devolver `Mono.error(new CampoObligatorioException(RECURSO, faltantes))` con **todos** los faltantes, sin llamar al gateway. Escritor: `identificacion` y `nombre` obligatorios; `nacionalidad` opcional. Bean Validation (`@NotBlank`/`@Valid`) no está en el proyecto: requiere aprobación.
+- Unicidad: antes de crear, consultar por la clave de negocio con el gateway; si existe, error 409 sin llamar a `crear`. Si no existe, crear dentro de `Mono.defer(...)` para que el guardado solo se ejecute cuando la consulta llega vacía. El índice único de Mongo (sección 6.1) cubre las peticiones simultáneas.
 - Usa la forma perezosa `Mono.error(() -> new ...)` en `switchIfEmpty`.
 
 ```java
@@ -154,22 +158,51 @@ package com.biblioteca.oriente.domain.usecase.escritor;
 
 import com.biblioteca.oriente.domain.model.escritor.Escritor;
 import com.biblioteca.oriente.domain.model.escritor.gateway.EscritorGateway;
+import com.biblioteca.oriente.domain.model.exception.CampoObligatorioException;
+import com.biblioteca.oriente.domain.model.exception.RecursoDuplicadoException;
 import com.biblioteca.oriente.domain.model.exception.RecursoNoEncontradoException;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @RequiredArgsConstructor
 public class EscritorUseCase {
+
+    private static final String RECURSO = "Escritor";
 
     private final EscritorGateway escritorGateway;
 
     public Mono<Escritor> crearEscritor(Escritor escritor) {
-        return escritorGateway.crearEscritor(escritor);
+        List<String> faltantes = camposObligatoriosFaltantes(escritor);
+        if (!faltantes.isEmpty()) {
+            return Mono.error(new CampoObligatorioException(RECURSO, faltantes));
+        }
+        return escritorGateway.consultarEscritor(escritor.getIdentificacion())
+                .flatMap(existente -> Mono.<Escritor>error(
+                        new RecursoDuplicadoException(RECURSO, escritor.getIdentificacion())))
+                .switchIfEmpty(Mono.defer(() -> escritorGateway.crearEscritor(escritor)));
     }
 
-    public Mono<Escritor> obtenerEscritorPorId(String escritorId) {
-        return escritorGateway.consultarEscritor(escritorId)
-                .switchIfEmpty(Mono.error(() -> new RecursoNoEncontradoException("Escritor", escritorId)));
+    public Mono<Escritor> obtenerEscritorPorId(String identificacion) {
+        return escritorGateway.consultarEscritor(identificacion)
+                .switchIfEmpty(Mono.error(() -> new RecursoNoEncontradoException(RECURSO, identificacion)));
+    }
+
+    private static List<String> camposObligatoriosFaltantes(Escritor escritor) {
+        List<String> faltantes = new ArrayList<>();
+        if (estaVacio(escritor.getIdentificacion())) {
+            faltantes.add("identificacion");
+        }
+        if (estaVacio(escritor.getNombre())) {
+            faltantes.add("nombre");
+        }
+        return faltantes;
+    }
+
+    private static boolean estaVacio(String valor) {
+        return valor == null || valor.isBlank();
     }
 }
 ```
@@ -228,12 +261,12 @@ server:
 spring:
   application:
     name: "oriente"
-  data:
-    mongodb:
-      uri: mongodb://localhost:27017/oriente_db
+  mongodb:
+    uri: ${MONGODB_URI:mongodb://localhost:27017/oriente_db}
+    database: oriente_db
 ```
 
-> **Spring Boot 4 (el proyecto usa 4.2.0):** las propiedades de conexión pasaron a `spring.mongodb.uri` / `spring.mongodb.database`; `spring.data.mongodb.uri` está deprecada. Si los datos no llegan a `oriente_db` (Mongo usa `test` por defecto), esa es la causa. Proponer el cambio al usuario antes de hacerlo.
+> **Spring Boot 4 (el proyecto usa 4.2.0):** la conexión se configura con `spring.mongodb.*`. No usar `spring.data.mongodb.uri`: Boot 4 la ignora y Mongo escribe en la base `test` por defecto (ya ocurrió en este proyecto). Para confirmar la base usada, arrancar con `--logging.level.org.mongodb.driver.protocol.command=DEBUG` y buscar `started on database "oriente_db"`.
 
 ## 6. Driven adapters — `infraestructure/driven_adapters/reactive_repository/<contexto>_mongo`
 
@@ -244,6 +277,7 @@ Cuatro clases por contexto: `Entity`, `Repository`, `TransformerRepository` y `A
 - `@Getter @Setter @AllArgsConstructor @NoArgsConstructor @Builder(toBuilder = true) @Document(collection = "<contexto en plural>")`.
 - Colección en plural en español: `escritores`, `libros`, `categorias`.
 - Las referencias a otros contextos se guardan como id (`escritorId`, `categoriaId`), no como objetos embebidos.
+- Claves de negocio únicas: `@Indexed(unique = true)`. El índice se crea al arrancar porque `application.yml` tiene `spring.data.mongodb.auto-index-creation: true`. Si la colección ya tiene valores repetidos, la creación del índice falla y la aplicación no arranca: limpiar los datos primero.
 
 ```java
 @Getter
@@ -254,6 +288,7 @@ Cuatro clases por contexto: `Entity`, `Repository`, `TransformerRepository` y `A
 @Document(collection = "escritores")
 public class EscritorEntity {
     private String id;
+    @Indexed(unique = true)
     private String identificacion;
     private String nombre;
     private String nacionalidad;
@@ -288,7 +323,8 @@ public interface EscritorTransformerRepository {
 
 - `@Repository @RequiredArgsConstructor`, implementa `<Entidad>Gateway`.
 - Campos: `repository` y `mapper` (el `TransformerRepository`).
-- Para crear, prefiere `repository.insert(...)`: `save` hace upsert y sobrescribe en silencio si llega un id existente.
+- Para crear usa `repository.insert(...)`, no `save`: `save` hace upsert y sobrescribe en silencio si llega un id existente.
+- Traduce `DuplicateKeyException` (violación del índice único) a `RecursoDuplicadoException` con `onErrorMap`; los demás errores se propagan tal cual.
 - Logs con SLF4J (`@Slf4j`), nunca `System.out` / `System.err`.
 
 ```java
@@ -304,7 +340,10 @@ public class EscritorAdapter implements EscritorGateway {
     public Mono<Escritor> crearEscritor(Escritor escritor) {
         return Mono.fromSupplier(() -> mapper.toEntity(escritor))
                 .flatMap(repository::insert)
-                .doOnError(err -> log.error("Error guardando escritor", err))
+                .doOnNext(guardado -> log.debug("Escritor guardado: id={} identificacion={}",
+                        guardado.getId(), guardado.getIdentificacion()))
+                .onErrorMap(DuplicateKeyException.class,
+                        error -> new RecursoDuplicadoException("Escritor", escritor.getIdentificacion()))
                 .map(mapper::toDomain);
     }
 
@@ -328,33 +367,44 @@ Tres clases por contexto: `Controller`, `DTO` y `Transformer`. **Endpoints anota
 
 ### 7.1 Controller
 
-- `@RestController @RequiredArgsConstructor @RequestMapping("/<contexto>")` (singular, como `/escritor`).
+- `@RestController @RequiredArgsConstructor @RequestMapping(<Entidad>Controller.<CONTEXTO>_PATH)`, con el path como constante pública (`ESCRITOR_PATH = "/escritor"`, en singular).
 - Campos: `transformer` y el `<Entidad>UseCase`.
-- Convención de rutas vigente:
-  - Crear: `@PostMapping(path = "/crear")` con `@RequestBody <Entidad>DTO`.
-  - Consultar por id: `@GetMapping(path = "/{<contexto>Id}")` con `@PathVariable`.
-- Devuelve `Mono<DTO>` / `Flux<DTO>`; el flujo es: DTO → `transformer.toEntity` → caso de uso → `transformer::toDTO`.
+- Rutas REST, **sin verbos en la URL** (`/crear`, `/listar`…): un segmento fijo junto a `/{variable}` hace la ruta ambigua (`GET /escritor/crear` se interpretaba como el escritor "crear").
+  - Crear: `@PostMapping` sobre la raíz (`POST /escritor`) → **201 Created** + header `Location` (construido con `UriComponentsBuilder` y codificado) + body con el recurso.
+  - Consultar: `@GetMapping("/{identificacion}")` → 200. La variable se llama como el dato que recibe (la clave de negocio, no el `id` de Mongo).
+- El flujo es: DTO → `transformer.toEntity` → caso de uso → `transformer::toDTO`.
 - Sin lógica de negocio, sin acceso a repositorios ni a `driven_adapters`, sin `System.out`.
 
 ```java
 @RestController
 @RequiredArgsConstructor
-@RequestMapping("/escritor")
+@RequestMapping(EscritorController.ESCRITOR_PATH)
 public class EscritorController {
+
+    public static final String ESCRITOR_PATH = "/escritor";
 
     private final EscritorTransformer transformer;
     private final EscritorUseCase escritorUseCase;
 
-    @PostMapping(path = "/crear")
-    public Mono<EscritorDTO> crear(@RequestBody EscritorDTO escritorDTO) {
+    @PostMapping
+    public Mono<ResponseEntity<EscritorDTO>> crear(@RequestBody EscritorDTO escritorDTO) {
         return escritorUseCase.crearEscritor(transformer.toEntity(escritorDTO))
+                .map(transformer::toDTO)
+                .map(creado -> ResponseEntity.created(ubicacion(creado.getIdentificacion())).body(creado));
+    }
+
+    @GetMapping(path = "/{identificacion}")
+    public Mono<EscritorDTO> consultarPorIdentificacion(@PathVariable String identificacion) {
+        return escritorUseCase.obtenerEscritorPorId(identificacion)
                 .map(transformer::toDTO);
     }
 
-    @GetMapping(path = "/{escritorId}")
-    public Mono<EscritorDTO> findByEscritorId(@PathVariable String escritorId) {
-        return escritorUseCase.obtenerEscritorPorId(escritorId)
-                .map(transformer::toDTO);
+    private static URI ubicacion(String identificacion) {
+        return UriComponentsBuilder.fromPath(ESCRITOR_PATH)
+                .pathSegment("{identificacion}")
+                .buildAndExpand(identificacion)
+                .encode()
+                .toUri();
     }
 }
 ```
@@ -394,34 +444,33 @@ public interface EscritorTransformer {
 
 Ya existe un único manejador global compartido. **No crear otro por contexto**; agregar un `@ExceptionHandler` nuevo cuando se apruebe una excepción.
 
-- `GlobalExceptionHandler` con `@RestControllerAdvice`; cada método recibe la excepción y el `ServerWebExchange` y devuelve `Mono<ResponseEntity<ErrorResponse>>`.
+- `GlobalExceptionHandler` con `@RestControllerAdvice` y `@Slf4j`; cada método recibe la excepción y el `ServerWebExchange`, registra el error en el log y delega en el helper privado `responder(status, mensaje, exchange)`, que arma el `Mono<ResponseEntity<ErrorResponse>>`.
 - Cuerpo: `ErrorResponse(status, error, message, path, timestamp)` (record).
+- Log: `warn` para errores del cliente (4xx), `error` con stack trace para el 500. El stack trace va solo al log, nunca a la respuesta.
 
 ```java
 @ExceptionHandler(RecursoNoEncontradoException.class)
 public Mono<ResponseEntity<ErrorResponse>> handleNotFound(
         RecursoNoEncontradoException ex, ServerWebExchange exchange) {
 
-    ErrorResponse body = new ErrorResponse(
-            HttpStatus.NOT_FOUND.value(),
-            HttpStatus.NOT_FOUND.getReasonPhrase(),
-            ex.getMessage(),
-            exchange.getRequest().getPath().value(),
-            Instant.now());
-    return Mono.just(ResponseEntity.status(HttpStatus.NOT_FOUND).body(body));
+    log.warn("Recurso no encontrado: {}", ex.getMessage());
+    return responder(HttpStatus.NOT_FOUND, ex.getMessage(), exchange);
 }
 ```
 
-Mapeo vigente:
+Mapeo vigente (Spring elige el manejador más específico):
 
 | Excepción | HTTP | `message` |
 |---|---|---|
+| `CampoObligatorioException` | 400 | el de la excepción (lista los campos faltantes) |
 | `RecursoNoEncontradoException` | 404 | el de la excepción |
-| `RecursoDuplicadoException` (comentado, pendiente) | 409 | el de la excepción |
-| `Exception` (cualquier otra) | 500 | `"Ocurrió un error interno en el servidor"`; nunca el detalle técnico |
+| `ServerWebInputException` (body ausente, JSON inválido, parámetro con tipo incorrecto) | 400 | `MENSAJE_SOLICITUD_INVALIDA` (genérico, sin detalle técnico) |
+| Otras `ResponseStatusException` (405, 415, 406…) | se conserva su código | texto estándar del código (`"Method Not Allowed"`…) |
+| `RecursoDuplicadoException` | 409 | el de la excepción |
+| `Exception` (cualquier otra) | 500 | `MENSAJE_ERROR_INTERNO` (`"Ocurrió un error interno en el servidor"`) |
 
-- Ojo: el manejador de `Exception` también captura los errores de entrada de WebFlux (`ServerWebInputException` por JSON inválido o body ausente) y los devuelve como 500. Si se necesita un 400, agregar su `@ExceptionHandler` con aprobación.
 - Cualquier código HTTP nuevo se acuerda con el usuario. Nunca exponer stack traces ni mensajes técnicos.
+- Probar con curl en Windows: enviar JSON con tildes desde archivo (`--data-binary @archivo.json`); en línea de comandos curl los envía mal codificados y la API responde 400 (correcto).
 
 ## 8. Operadores Reactor: guía rápida
 
@@ -504,12 +553,15 @@ JAVA_HOME="/c/Program Files/Java/jdk-17" ./gradlew bootRun                      
 - Prueba manual: requiere Mongo en `localhost:27017`. **Una petición exitosa escribe datos reales**: avisar al usuario e informar los ids creados. Detener la aplicación al terminar.
 
 ```bash
-curl --location 'http://localhost:8080/escritor/crear' \
+curl -i --location 'http://localhost:8080/escritor' \
 --header 'Content-Type: application/json' \
 --data '{"identificacion": "1001", "nombre": "Gabriel García Márquez", "nacionalidad": "Colombiana"}'
+# 201 + Location: /escritor/1001; repetirlo da 409
 
 curl --location 'http://localhost:8080/escritor/1001'
 ```
+
+En Git Bash de Windows, si el JSON lleva tildes, envíalo desde un archivo UTF-8 (`--data-binary @escritor.json`); en línea de comandos llega mal codificado y la API responde 400.
 
 ## 11. Estado actual y deuda conocida
 
@@ -517,10 +569,9 @@ No corregir sin aprobación; señalarlo al usuario cuando la tarea toque esos ar
 
 - `categoria` y `libro` están en esqueleto: `Categoria`, `CategoriaAdapter`, `CategoriaEntity`, `CategoriaRepository`, `LibroAdapter` y `LibroRepository` están vacíos; no tienen gateway, caso de uso, transformers ni entry point.
 - `Libro` (dominio: `id`, `descripcion`) no coincide con `LibroEntity` (`codigoLibro`, `nombre`, `valorUnitario`, `escritorId`, `categoriaId`). Hay que alinear los campos antes de crear su transformer.
-- `EscritorAdapter` y `EscritorController` usan `System.out` / `System.err`; `EscritorAdapter.crearEscritor` usa `save` en vez de `insert`.
-- `EscritorUseCase.obtenerEscritorPorId` usa `Mono.error(new ...)` (forma no perezosa).
+- `EscritorUseCase.obtenerEscritorPorId` conserva su nombre aunque busca por `identificacion` (renombrarlo implica cambiar sus pruebas).
 - `build.gradle` define `lombokMapstructBindingVersion` pero no declara `lombok-mapstruct-binding`. Como el dominio y los DTOs usan Lombok, si MapStruct reporta *"Unknown property"* o genera mapeos vacíos, falta agregar `annotationProcessor "org.projectlombok:lombok-mapstruct-binding:${lombokMapstructBindingVersion}"` (y su `testAnnotationProcessor`).
-- `application.yml` usa `spring.data.mongodb.uri` (ver nota de Spring Boot 4 en la sección 5) y `application.properties` repite `spring.application.name`.
+- `application.properties` repite `spring.application.name` (la configuración real está en `application.yml`).
 
 ## 12. Checklist antes de entregar
 

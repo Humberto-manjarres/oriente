@@ -4,7 +4,11 @@ spring:
   application:
     name: "oriente"
 
+  # Spring Boot 4: la conexión se configura con spring.mongodb.* (spring.data.mongodb.uri ya no se aplica).
+  mongodb:
+    uri: ${MONGODB_URI:mongodb://localhost:27017/oriente_db}
+    database: oriente_db
   data:
     mongodb:
-      uri: mongodb://localhost:27017/oriente_db
-      #database: oriente_db
+      # Crea al arrancar los índices declarados con @Indexed (p. ej. identificacion única en escritores).
+      auto-index-creation: true
