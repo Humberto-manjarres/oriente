@@ -11,9 +11,6 @@ import org.springframework.data.mongodb.core.mapping.Document;
 @Document(collection = "libros")
 public class LibroEntity {
     private String id;
-    private String codigoLibro;
-    private String nombre;
-    private Integer valorUnitario;
-    private String escritorId;
-    private String categoriaId;
+    private String titulo;
+    private String descripcion;
 }
